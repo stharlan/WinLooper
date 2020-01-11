@@ -5,6 +5,7 @@
 #include <functiondiscoverykeys_devpkey.h>
 #include <Audioclient.h>
 #include <stdio.h>
+#include <CommCtrl.h>
 #include "framework.h"
 #include "looper.h"
 
@@ -26,6 +27,8 @@ HINSTANCE hInst;                                // current instance
 WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
 WCHAR szWindowClass[MAX_LOADSTRING];            // the main window class name
 
+HWND hwndPb = NULL;
+
 HANDLE g_hStopEvent = NULL;
 HANDLE g_hCaptureThread = NULL;
 BOOL g_isInitialFrame = TRUE;
@@ -43,6 +46,7 @@ typedef struct _device_context {
     UINT32 loopBufferOffset = 0;
     UINT32 loopBufferSize = 0;
     WAVEFORMATEX* g_lpWfex = NULL;
+    int defaultTimeSlice = 0;
 } DEVICE_CONTEXT;
 
 DEVICE_CONTEXT g_RecContext;
@@ -219,13 +223,16 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
     hInst = hInstance; // Store instance handle in our global variable
 
-    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, 0, CW_USEDEFAULT, 0, nullptr, nullptr, hInstance, nullptr);
+    HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW^(WS_THICKFRAME|WS_MAXIMIZEBOX),
+        CW_USEDEFAULT, 0, 640, 480, nullptr, nullptr, hInstance, nullptr);
 
     if (!hWnd)
     {
         return FALSE;
     }
+
+    hwndPb = CreateWindow(PROGRESS_CLASS, NULL, WS_CHILD | WS_VISIBLE,
+        10, 10, 605, 20, hWnd, (HMENU)0, hInstance, NULL);
 
     load_device_menu_items(hWnd, MENU_ID_REC);
     load_device_menu_items(hWnd, MENU_ID_PLAY);
@@ -247,6 +254,8 @@ void initialize_selected_device(HWND hWnd, UINT itemId, int type)
     UINT32 baseDeviceIndex = BASE_REC_DEVICE_ITEM_ID;
     DEVICE_CONTEXT* ctx = &g_RecContext;
     DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+    long long defaultFrames = 0;
+    long long minFrames = 0;
 
     EnableWindow(hWnd, FALSE);
     SetWindowText(hWnd, L"looper (Initializing device...)");
@@ -316,6 +325,8 @@ void initialize_selected_device(HWND hWnd, UINT itemId, int type)
         goto done;
     }
 
+    // in 100 nanosecond increments
+
     wprintf(L"========================================\n");
     wprintf(L"default time = %lli\n", defaultTime);
     wprintf(L"minimum time = %lli\n", minimumTime);
@@ -325,6 +336,15 @@ void initialize_selected_device(HWND hWnd, UINT itemId, int type)
         MessageBox(hWnd, L"ERROR: Failed to get device mix format.", L"ERROR", MB_OK);
         goto done;
     }
+
+    defaultFrames = defaultTime * ctx->g_lpWfex->nSamplesPerSec / 10000000;
+    minFrames = minimumTime * ctx->g_lpWfex->nSamplesPerSec / 10000000;
+
+    wprintf(L"Default Frames = %lli\n", defaultFrames);
+    wprintf(L"Minimum Frames = %lli\n", minFrames);
+
+    ctx->defaultTimeSlice = (int)defaultFrames;
+    wprintf(L"Default time slice (frames) = %i\n", ctx->defaultTimeSlice);
 
     wprintf(L"Format Tag        = %i\n", ctx->g_lpWfex->wFormatTag);
     wprintf(L"Channels          = %i\n", ctx->g_lpWfex->nChannels);
@@ -413,7 +433,8 @@ done:
     SetWindowText(hWnd, L"looper");
 }
 
-void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* lpRenderClient)
+void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* lpRenderClient,
+    UINT* ticks)
 {
     BYTE* pCapData = NULL;
     BYTE* pRenData = NULL;
@@ -426,6 +447,11 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
     UINT32 loopBufferAvailable = 0;
     size_t sizeToWrite = 0;
     HRESULT hr = 0;
+
+    if (TRUE == g_isInitialFrame)
+    {
+        g_isInitialFrame = FALSE;
+    }
 
     //lpCaptureClient->GetBuffer(&pCapData, &NumFramesToRead, &bufferFlags, &devPos, &qpcPos);
 
@@ -522,12 +548,14 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
                         g_PbkContext.loopBuffer + (g_PbkContext.loopBufferOffset * g_PbkContext.g_lpWfex->nBlockAlign),
                         framesAtEnd * g_PbkContext.g_lpWfex->nBlockAlign);
                     size_t framesAtBegin = frameBufferAvailable - framesAtEnd;
+
                     if (framesAtBegin > 0) {
                         memcpy(pRenData + (framesAtEnd * g_PbkContext.g_lpWfex->nBlockAlign),
                             g_PbkContext.loopBuffer,
                             framesAtBegin * g_PbkContext.g_lpWfex->nBlockAlign);
                     }
                     g_PbkContext.loopBufferOffset = framesAtBegin;
+                    memset(ticks, 0, sizeof(UINT) * 10);
                 }
                 lpRenderClient->ReleaseBuffer(frameBufferAvailable, 0);
                 wprintf(L"rendered %i frames; lbofst %i\n", frameBufferAvailable, g_PbkContext.loopBufferOffset);
@@ -543,6 +571,15 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
     else {
         wprintf(L"ERROR: Failed to get current padding\n");
     }
+
+    int tick = (int)(10.0f * ((float)g_PbkContext.loopBufferOffset / (float)g_PbkContext.loopBufferSize));
+    if (tick < 10) {
+        if (ticks[tick] == 0) {
+            SendMessage(hwndPb, PBM_SETPOS, (tick+1) * 10, 0);
+            ticks[tick] = 1;
+        }
+    }
+
 }
 
 DWORD WINAPI CaptureThread(LPVOID lpParm)
@@ -557,8 +594,15 @@ DWORD WINAPI CaptureThread(LPVOID lpParm)
     };
     HRESULT hr = 0;
     BYTE* pData = NULL;
+    UINT ticks[10];
 
     g_isInitialFrame = TRUE;
+
+    memset(ticks, 0, sizeof(UINT) * 10);
+
+    // set the recording offset to one time slice before the end of the buffer
+    g_RecContext.loopBufferOffset = g_RecContext.loopBufferSize - (10 * g_RecContext.defaultTimeSlice);
+    //g_RecContext.loopBufferOffset = g_RecContext.defaultTimeSlice;
 
     if (FAILED(g_RecContext.g_lpClient->GetService(__uuidof(IAudioCaptureClient), (void**)&lpCaptureClient)))
     {
@@ -605,7 +649,7 @@ DWORD WINAPI CaptureThread(LPVOID lpParm)
         waitResult = WaitForMultipleObjects(2, hEvents, FALSE, 1000);
         switch (waitResult) {
         case WAIT_OBJECT_0:
-            process_buffers(lpCaptureClient, lpRenderClient);
+            process_buffers(lpCaptureClient, lpRenderClient, &ticks[0]);
             break;
         case (WAIT_OBJECT_0 + 1):
             bDone = TRUE;
