@@ -34,17 +34,25 @@ HANDLE g_hCaptureThread = NULL;
 BOOL g_isInitialFrame = TRUE;
 UINT64 g_devPosInitial = 0;
 
+typedef struct S_FRAME_2CH_FLOAT32 {
+    float ch[2];
+} FRAME_2CH_FLOAT32;
+
+typedef struct S_FRAME_8CH_FLOAT32 {
+    float ch[8];
+} FRAME_8CH_FLOAT32;
+
 typedef struct _device_context {
     IMMDevice* g_lpDevice = NULL;
     IAudioClient* g_lpClient = NULL;
     UINT g_NumDevices = 0;
     HANDLE g_hAudioEvent = NULL;
     BYTE* frameBuffer = NULL;
-    UINT32 frameBufferOffset = 0;
-    UINT32 frameBufferSize = 0;
+    UINT32 frameBufferOffsetFrames = 0;
+    UINT32 frameBufferSizeFrames = 0;
     BYTE* loopBuffer = NULL;
-    UINT32 loopBufferOffset = 0;
-    UINT32 loopBufferSize = 0;
+    UINT32 loopBufferOffsetFrames = 0;
+    UINT32 loopBufferSizeFrames = 0;
     WAVEFORMATEX* g_lpWfex = NULL;
     int defaultTimeSlice = 0;
 } DEVICE_CONTEXT;
@@ -361,6 +369,26 @@ void initialize_selected_device(HWND hWnd, UINT itemId, int type)
         wprintf(L"Samples Per Block     = %i\n", wfext->Samples.wSamplesPerBlock);
         wprintf(L"Channel Mask          = %i\n", wfext->dwChannelMask);
 
+        wprintf(L"CHANNELS:\n");
+        if(wfext->dwChannelMask & SPEAKER_FRONT_LEFT) wprintf(L"SPEAKER FRONT LEFT\n");
+        if (wfext->dwChannelMask & SPEAKER_FRONT_RIGHT) wprintf(L"SPEAKER FRONT RIGHT\n");
+        if (wfext->dwChannelMask & SPEAKER_FRONT_CENTER) wprintf(L"SPEAKER FRONT CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_LOW_FREQUENCY) wprintf(L"SPEAKER LOW FREQ\n");
+        if (wfext->dwChannelMask & SPEAKER_BACK_LEFT) wprintf(L"SPEAKER BACK LEFT\n");
+        if (wfext->dwChannelMask & SPEAKER_BACK_RIGHT) wprintf(L"SPEAKER BACK RIGHT\n");
+        if (wfext->dwChannelMask & SPEAKER_FRONT_LEFT_OF_CENTER) wprintf(L"SPEAKER FRONT LEFT CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_FRONT_RIGHT_OF_CENTER) wprintf(L"SPEAKER FRONT RIGHT CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_BACK_CENTER) wprintf(L"SPEAKER BACK CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_SIDE_LEFT) wprintf(L"SPEAKER SIDE LEFT\n");
+        if (wfext->dwChannelMask & SPEAKER_SIDE_RIGHT) wprintf(L"SPEAKER SIDE RIGHT\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_CENTER) wprintf(L"SPEAKER TOP CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_FRONT_LEFT) wprintf(L"SPEAKER TOP FRONT LEFT\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_FRONT_CENTER) wprintf(L"SPEAKER TOP FRONT CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_FRONT_RIGHT) wprintf(L"SPEAKER TOP FRONT RIGHT\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_BACK_LEFT) wprintf(L"SPEAKER TOP BACK LEFT\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_BACK_CENTER) wprintf(L"SPEAKER TOP BACK CENTER\n");
+        if (wfext->dwChannelMask & SPEAKER_TOP_BACK_RIGHT) wprintf(L"SPEAKER TOP BACK RIGHT\n");
+
         if (IsEqualGUID(wfext->SubFormat, KSDATAFORMAT_SUBTYPE_PCM))
         {
             wprintf(L"Extensible subtype is PCM\n");
@@ -387,21 +415,25 @@ void initialize_selected_device(HWND hWnd, UINT itemId, int type)
         goto done;
     }
 
-    if(FAILED(ctx->g_lpClient->GetBufferSize(&ctx->frameBufferSize)))
+    if(FAILED(ctx->g_lpClient->GetBufferSize(&ctx->frameBufferSizeFrames)))
     {
         MessageBox(hWnd, L"ERROR: Failed to get buffer size frames.", L"ERROR", MB_OK);
         goto done;
     }
 
-    wprintf(L"buffer size frames = %i\n", ctx->frameBufferSize);
-    ctx->frameBufferOffset = 0;
-    ctx->frameBuffer = (BYTE*)malloc(ctx->frameBufferSize * ctx->g_lpWfex->nBlockAlign);
-    ZeroMemory(ctx->frameBuffer, ctx->frameBufferSize * ctx->g_lpWfex->nBlockAlign);
+    wprintf(L"buffer size frames = %i\n", ctx->frameBufferSizeFrames);
+    ctx->frameBufferOffsetFrames = 0;
+    ctx->frameBuffer = (BYTE*)malloc(ctx->frameBufferSizeFrames * ctx->g_lpWfex->nBlockAlign);
+    ZeroMemory(ctx->frameBuffer, ctx->frameBufferSizeFrames* ctx->g_lpWfex->nBlockAlign);
+    wprintf(L"frame buffer size frames = %i\n", ctx->frameBufferSizeFrames);
+    wprintf(L"frame buffer size bytes = %i\n", ctx->frameBufferSizeFrames * ctx->g_lpWfex->nBlockAlign);
 
     ctx->loopBuffer = (BYTE*)malloc(4 * ctx->g_lpWfex->nSamplesPerSec * ctx->g_lpWfex->nBlockAlign);
     ZeroMemory(ctx->loopBuffer, 4 * ctx->g_lpWfex->nSamplesPerSec * ctx->g_lpWfex->nBlockAlign);
-    ctx->loopBufferSize = 4 * ctx->g_lpWfex->nSamplesPerSec;
-    ctx->loopBufferOffset = 0;
+    ctx->loopBufferSizeFrames = 4 * ctx->g_lpWfex->nSamplesPerSec;
+    ctx->loopBufferOffsetFrames = 0;
+    wprintf(L"loop buffer size frames = %i\n", ctx->loopBufferSizeFrames);
+    wprintf(L"loop buffer size bytes = %i\n", ctx->loopBufferSizeFrames * ctx->g_lpWfex->nBlockAlign);
 
     if (type == ACTION_REC) {
         ctx->g_hAudioEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
@@ -438,13 +470,13 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
 {
     BYTE* pCapData = NULL;
     BYTE* pRenData = NULL;
-    UINT32 NumFramesToRead = 0;
+    UINT32 NumFramesToReadFrames = 0;
     DWORD bufferFlags = 0;
     UINT64 devPos = 0;
     UINT64 qpcPos = 0;
-    UINT32 renderPadding = 0;
-    UINT32 frameBufferAvailable = 0;
-    UINT32 loopBufferAvailable = 0;
+    UINT32 renderPaddingFrames = 0;
+    UINT32 frameBufferAvailableFrames = 0;
+    UINT32 loopBufferAvailableFrames = 0;
     size_t sizeToWrite = 0;
     HRESULT hr = 0;
 
@@ -481,43 +513,67 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
     ////);
 
     // capture
-    if (!FAILED(lpCaptureClient->GetBuffer(&pCapData, &NumFramesToRead, &bufferFlags, &devPos, &qpcPos)))
+    if (!FAILED(lpCaptureClient->GetBuffer(&pCapData, &NumFramesToReadFrames, &bufferFlags, &devPos, &qpcPos)))
     {
-        if (NumFramesToRead > 0) {
-            loopBufferAvailable = g_RecContext.loopBufferSize - g_RecContext.loopBufferOffset;
-            if (loopBufferAvailable > NumFramesToRead)
+        if (NumFramesToReadFrames > 0) {
+            loopBufferAvailableFrames = g_RecContext.loopBufferSizeFrames - g_RecContext.loopBufferOffsetFrames;
+            if (loopBufferAvailableFrames > NumFramesToReadFrames)
             {
 
-                void* src = g_RecContext.loopBuffer + (g_RecContext.loopBufferOffset * g_RecContext.g_lpWfex->nBlockAlign);
-                void* dest = pCapData;
-                size_t sz = NumFramesToRead * g_RecContext.g_lpWfex->nBlockAlign;
+                void* dest = g_RecContext.loopBuffer 
+                    + (g_RecContext.loopBufferOffsetFrames * g_RecContext.g_lpWfex->nBlockAlign);
+                void* src = pCapData;
+                size_t sz = NumFramesToReadFrames * g_RecContext.g_lpWfex->nBlockAlign;
 
-                memcpy(src, dest, sz);
-                g_RecContext.loopBufferOffset += NumFramesToRead;
+                memcpy(dest, src, sz);
+                g_RecContext.loopBufferOffsetFrames += NumFramesToReadFrames;
 
             }
             else {
-                size_t framesAtEnd = g_RecContext.loopBufferSize - g_RecContext.loopBufferOffset;
+                size_t framesAtEndFrames = 
+                    g_RecContext.loopBufferSizeFrames - g_RecContext.loopBufferOffsetFrames;
 
-                memcpy(g_RecContext.loopBuffer + (g_RecContext.loopBufferOffset * g_RecContext.g_lpWfex->nBlockAlign),
-                    pCapData,
-                    framesAtEnd * g_RecContext.g_lpWfex->nBlockAlign);
+                void* dest = g_RecContext.loopBuffer
+                    + (g_RecContext.loopBufferOffsetFrames * g_RecContext.g_lpWfex->nBlockAlign);
+                void* src = pCapData;
+                size_t sz = framesAtEndFrames * g_RecContext.g_lpWfex->nBlockAlign;
+                memcpy(dest, src, sz);
 
                 wprintf(L"update pbk buffer\n");
-                memcpy(g_PbkContext.loopBuffer,
-                    g_RecContext.loopBuffer,
-                    g_RecContext.loopBufferSize * g_RecContext.g_lpWfex->nBlockAlign);
-
-                size_t framesAtBegin = NumFramesToRead - framesAtEnd;
-                if (framesAtBegin > 0) {
-                    memcpy(g_RecContext.loopBuffer,
-                        pCapData + (framesAtEnd * g_RecContext.g_lpWfex->nBlockAlign),
-                        framesAtBegin * g_RecContext.g_lpWfex->nBlockAlign);
+                FRAME_2CH_FLOAT32* recFrames = (FRAME_2CH_FLOAT32*)g_RecContext.loopBuffer;
+                if (g_PbkContext.g_lpWfex->nChannels == 8) {
+                    FRAME_8CH_FLOAT32* pbkFrames = (FRAME_8CH_FLOAT32*)g_PbkContext.loopBuffer;
+                    for (unsigned int f = 0; f < g_RecContext.loopBufferSizeFrames; f++) {
+                        pbkFrames[f].ch[0] = recFrames[f].ch[0];
+                        pbkFrames[f].ch[1] = recFrames[f].ch[1];
+                        pbkFrames[f].ch[2] = 0.0f;
+                        pbkFrames[f].ch[3] = 0.0f;
+                        pbkFrames[f].ch[4] = 0.0f;
+                        pbkFrames[f].ch[5] = 0.0f;
+                        pbkFrames[f].ch[6] = 0.0f;
+                        pbkFrames[f].ch[7] = 0.0f;
+                    }
                 }
-                g_RecContext.loopBufferOffset = framesAtBegin;
+                else if (g_PbkContext.g_lpWfex->nChannels == 2) {
+                    FRAME_2CH_FLOAT32* pbkFrames = (FRAME_2CH_FLOAT32*)g_PbkContext.loopBuffer;
+                    for (unsigned int f = 0; f < g_RecContext.loopBufferSizeFrames; f++) {
+                        pbkFrames[f].ch[0] = recFrames[f].ch[0];
+                        pbkFrames[f].ch[1] = recFrames[f].ch[1];
+                    }
+                }
+                wprintf(L"copied %i frames from rec buffer to pbk buffer\n", g_RecContext.loopBufferSizeFrames);
+
+                size_t framesAtBeginFrames = NumFramesToReadFrames - framesAtEndFrames;
+                if (framesAtBeginFrames > 0) {
+                    dest = g_RecContext.loopBuffer;
+                    src = pCapData + (framesAtEndFrames * g_RecContext.g_lpWfex->nBlockAlign);
+                    sz = framesAtBeginFrames * g_RecContext.g_lpWfex->nBlockAlign;
+                    memcpy(dest, src, sz);
+                }
+                g_RecContext.loopBufferOffsetFrames = (UINT32)framesAtBeginFrames;
             }
-            lpCaptureClient->ReleaseBuffer(NumFramesToRead);
-            wprintf(L"captured %i frames; lbofst %i - ", NumFramesToRead, g_RecContext.loopBufferOffset);
+            lpCaptureClient->ReleaseBuffer(NumFramesToReadFrames);
+            wprintf(L"captured %i frames; lbofst %i - ", NumFramesToReadFrames, g_RecContext.loopBufferOffsetFrames);
         }
         else {
             wprintf(L"INFO: no frames available - ");
@@ -528,40 +584,47 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
     }
 
     // render
-    if (!FAILED(g_PbkContext.g_lpClient->GetCurrentPadding(&renderPadding)))
+    if (!FAILED(g_PbkContext.g_lpClient->GetCurrentPadding(&renderPaddingFrames)))
     {
-        frameBufferAvailable = g_PbkContext.frameBufferSize - renderPadding;
-        if (frameBufferAvailable > 0) {
-            if (!FAILED(lpRenderClient->GetBuffer(frameBufferAvailable, &pRenData)))
+        frameBufferAvailableFrames = g_PbkContext.frameBufferSizeFrames - renderPaddingFrames;
+        if (frameBufferAvailableFrames > 0) {
+            if (!FAILED(lpRenderClient->GetBuffer(frameBufferAvailableFrames, &pRenData)))
             {
-                loopBufferAvailable = g_PbkContext.loopBufferSize - g_PbkContext.loopBufferOffset;
-                if (loopBufferAvailable > frameBufferAvailable)
+                loopBufferAvailableFrames = g_PbkContext.loopBufferSizeFrames - g_PbkContext.loopBufferOffsetFrames;
+                if (loopBufferAvailableFrames > frameBufferAvailableFrames)
                 {
-                    memcpy(pRenData,
-                        g_PbkContext.loopBuffer + (g_PbkContext.loopBufferOffset * g_PbkContext.g_lpWfex->nBlockAlign),
-                        frameBufferAvailable * g_PbkContext.g_lpWfex->nBlockAlign);
-                    g_PbkContext.loopBufferOffset += frameBufferAvailable;
+                    void* dest = pRenData;
+                    void* src = g_PbkContext.loopBuffer 
+                        + (g_PbkContext.loopBufferOffsetFrames * g_PbkContext.g_lpWfex->nBlockAlign);
+                    size_t sz = frameBufferAvailableFrames * g_PbkContext.g_lpWfex->nBlockAlign;
+                    memcpy(dest, src, sz);
+
+                    g_PbkContext.loopBufferOffsetFrames += frameBufferAvailableFrames;
                 }
                 else {
-                    size_t framesAtEnd = g_PbkContext.loopBufferSize - g_PbkContext.loopBufferOffset;
-                    memcpy(pRenData,
-                        g_PbkContext.loopBuffer + (g_PbkContext.loopBufferOffset * g_PbkContext.g_lpWfex->nBlockAlign),
-                        framesAtEnd * g_PbkContext.g_lpWfex->nBlockAlign);
-                    size_t framesAtBegin = frameBufferAvailable - framesAtEnd;
+                    size_t framesAtEndFrames = g_PbkContext.loopBufferSizeFrames - g_PbkContext.loopBufferOffsetFrames;
+                    void* dest = pRenData;
+                    void* src = g_PbkContext.loopBuffer 
+                        + (g_PbkContext.loopBufferOffsetFrames * g_PbkContext.g_lpWfex->nBlockAlign);
+                    size_t sz = framesAtEndFrames * g_PbkContext.g_lpWfex->nBlockAlign;
+                    memcpy(dest, src, sz);
 
-                    if (framesAtBegin > 0) {
-                        memcpy(pRenData + (framesAtEnd * g_PbkContext.g_lpWfex->nBlockAlign),
-                            g_PbkContext.loopBuffer,
-                            framesAtBegin * g_PbkContext.g_lpWfex->nBlockAlign);
+                    size_t framesAtBeginFrames = frameBufferAvailableFrames - framesAtEndFrames;
+
+                    if (framesAtBeginFrames > 0) {
+                        dest = pRenData + (framesAtEndFrames * g_PbkContext.g_lpWfex->nBlockAlign);
+                        src = g_PbkContext.loopBuffer;
+                        sz = framesAtBeginFrames * g_PbkContext.g_lpWfex->nBlockAlign;
+                        memcpy(dest, src, sz);
                     }
-                    g_PbkContext.loopBufferOffset = framesAtBegin;
+                    g_PbkContext.loopBufferOffsetFrames = (UINT32)framesAtBeginFrames;
                     memset(ticks, 0, sizeof(UINT) * 10);
                 }
-                lpRenderClient->ReleaseBuffer(frameBufferAvailable, 0);
-                wprintf(L"rendered %i frames; lbofst %i\n", frameBufferAvailable, g_PbkContext.loopBufferOffset);
+                lpRenderClient->ReleaseBuffer(frameBufferAvailableFrames, 0);
+                wprintf(L"rendered %i frames; lbofst %i\n", frameBufferAvailableFrames, g_PbkContext.loopBufferOffsetFrames);
             }
             else {
-                wprintf(L"ERROR: Failed to get render buffer for %i frames\n", frameBufferAvailable);
+                wprintf(L"ERROR: Failed to get render buffer for %i frames\n", frameBufferAvailableFrames);
             }
         }
         else {
@@ -572,7 +635,7 @@ void process_buffers(IAudioCaptureClient* lpCaptureClient, IAudioRenderClient* l
         wprintf(L"ERROR: Failed to get current padding\n");
     }
 
-    int tick = (int)(10.0f * ((float)g_PbkContext.loopBufferOffset / (float)g_PbkContext.loopBufferSize));
+    int tick = (int)(10.0f * ((float)g_PbkContext.loopBufferOffsetFrames / (float)g_PbkContext.loopBufferSizeFrames));
     if (tick < 10) {
         if (ticks[tick] == 0) {
             SendMessage(hwndPb, PBM_SETPOS, (tick+1) * 10, 0);
@@ -601,8 +664,9 @@ DWORD WINAPI CaptureThread(LPVOID lpParm)
     memset(ticks, 0, sizeof(UINT) * 10);
 
     // set the recording offset to one time slice before the end of the buffer
-    g_RecContext.loopBufferOffset = g_RecContext.loopBufferSize - (10 * g_RecContext.defaultTimeSlice);
+    //g_RecContext.loopBufferOffsetFrames = g_RecContext.loopBufferSizeFrames - (10 * g_RecContext.defaultTimeSlice);
     //g_RecContext.loopBufferOffset = g_RecContext.defaultTimeSlice;
+    g_RecContext.loopBufferOffsetFrames = 0;
 
     if (FAILED(g_RecContext.g_lpClient->GetService(__uuidof(IAudioCaptureClient), (void**)&lpCaptureClient)))
     {
@@ -616,9 +680,9 @@ DWORD WINAPI CaptureThread(LPVOID lpParm)
         return 0;
     }
 
-    if (!FAILED(lpRenderClient->GetBuffer(g_PbkContext.frameBufferSize, &pData)))
+    if (!FAILED(lpRenderClient->GetBuffer(g_PbkContext.frameBufferSizeFrames, &pData)))
     {
-        if (FAILED(lpRenderClient->ReleaseBuffer(g_PbkContext.frameBufferSize, AUDCLNT_BUFFERFLAGS_SILENT)))
+        if (FAILED(lpRenderClient->ReleaseBuffer(g_PbkContext.frameBufferSizeFrames, AUDCLNT_BUFFERFLAGS_SILENT)))
         {
             wprintf(L"ERROR: Failed to write initial silence to render buffer\n");
             return 0;
@@ -714,7 +778,7 @@ BOOL start_looper(HWND hWnd)
         return FALSE;
     }
 
-    if (g_RecContext.frameBufferSize != g_PbkContext.frameBufferSize)
+    if (g_RecContext.frameBufferSizeFrames != g_PbkContext.frameBufferSizeFrames)
     {
         MessageBox(hWnd, L"ERROR: Both devices must have the same frame buffer size.", L"ERROR", MB_OK);
         return FALSE;
